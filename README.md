@@ -1,5 +1,6 @@
 <div align="center">
   <h1>Smart Dock</h1>
+  <h2>Modified by Christian Cabrero</h2>
   A user-friendly desktop mode launcher that offers a modern and customizable user interface
 </div>
 
