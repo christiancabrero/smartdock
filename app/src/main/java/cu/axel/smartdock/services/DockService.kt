@@ -604,7 +604,11 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
         }
     }
 
+    //Al mantener pulsada las apps en el dock
     override fun onDockAppLongClicked(app: DockApp, view: View) {
+        //Vista de opciones contextuales de App Drawer
+        showAppContextMenu(app, view)
+        //Vista de opciones contextuales de Dock
         showDockAppContextMenu(app, view)
     }
 
@@ -1331,17 +1335,24 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
         val layoutParams = Utils.makeWindowParams(-2, -2, context, secondary)
         view.setBackgroundResource(R.drawable.round_rect)
         ColorUtils.applyMainColor(context, sharedPreferences, view)
-        layoutParams.gravity = Gravity.BOTTOM or Gravity.START
+
+        // Ajusta la posición de la vista para que no se superponga con showAppContextMenu
+        layoutParams.gravity = Gravity.TOP or Gravity.START // Cambiar la gravedad a TOP
         layoutParams.flags =
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-        layoutParams.y = Utils.dpToPx(context, 2) + dockHeight
+
         val location = IntArray(2)
         anchor.getLocationOnScreen(location)
+
+        // Posición horizontal: mantiene la misma posición x
         layoutParams.x = location[0]
+
+        // Posición vertical: mueve la vista hacia arriba para que no se superponga
+        layoutParams.y = location[1] - Utils.dpToPx(context, 200) // Desplaza hacia arriba ajustando el valor de -200
+
         view.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_OUTSIDE)
                 windowManager.removeView(view)
-
             false
         }
         val icon = view.findViewById<ImageView>(R.id.pin_entry_iv)
