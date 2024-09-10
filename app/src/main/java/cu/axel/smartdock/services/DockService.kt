@@ -22,7 +22,10 @@ import android.content.pm.LauncherApps
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.res.Configuration
+import android.graphics.Color
 import android.hardware.usb.UsbManager
+import android.health.connect.datatypes.HeightRecord
+import android.icu.text.ListFormatter.Width
 import android.media.AudioManager
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -31,6 +34,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.provider.Settings
+import android.util.Log
 import android.view.ContextThemeWrapper
 import android.view.Display
 import android.view.GestureDetector
@@ -39,7 +43,10 @@ import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.View.MEASURED_HEIGHT_STATE_SHIFT
+import android.view.View.MeasureSpec
 import android.view.View.OnTouchListener
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.animation.AccelerateDecelerateInterpolator
@@ -60,6 +67,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.size
 import androidx.core.widget.addTextChangedListener
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.GridLayoutManager
@@ -89,6 +97,8 @@ import cu.axel.smartdock.utils.DeepShortcutManager
 import cu.axel.smartdock.utils.DeviceUtils
 import cu.axel.smartdock.utils.OnSwipeListener
 import cu.axel.smartdock.utils.Utils
+import cu.axel.smartdock.utils.Utils.getScreenHeight
+import cu.axel.smartdock.utils.Utils.getViewHeight
 import cu.axel.smartdock.widgets.HoverInterceptorLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -96,6 +106,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.UnsupportedEncodingException
 import java.net.URLEncoder
+import kotlin.math.log
 
 const val DOCK_SERVICE_CONNECTED = "service_connected"
 const val ACTION_TAKE_SCREENSHOT = "take_screenshot"
@@ -132,6 +143,7 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
     private lateinit var windowManager: WindowManager
     private lateinit var appsSeparator: View
     private var appMenuVisible = false
+    private var alturaShowAppContextMenuOnDockApps = 530 //Máximo de altura que puede tener actions_LV
     private var powerMenuVisible = false
     private var isPinned = false
     private var audioPanelVisible = false
@@ -606,10 +618,11 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
 
     //Al mantener pulsada las apps en el dock
     override fun onDockAppLongClicked(app: DockApp, view: View) {
-        //Vista de opciones contextuales de App Drawer
-        showAppContextMenu(app, view)
-        //Vista de opciones contextuales de Dock
+        //Vista de opciones contextuales de dock
         showDockAppContextMenu(app, view)
+        //Vista de opciones contextuales de app
+        showAppContextMenuOnDockApps(app, view)
+
     }
 
     override fun onAppClicked(app: App, item: View) {
@@ -665,7 +678,7 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
         iconIv.setImageDrawable(notificationIcon)
         ColorUtils.applyColor(iconIv, ColorUtils.getDrawableDominantColor(notificationIcon))
         toast.alpha = 0f
-        toast.animate().alpha(1f).setDuration(250)
+        toast.animate().alpha(1f).setDuration(400)
             .setInterpolator(AccelerateDecelerateInterpolator())
         Handler(Looper.getMainLooper()).postDelayed({
             toast.animate().alpha(0f).setDuration(400)
@@ -1101,8 +1114,9 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
             searchLayout.gravity = Gravity.START
             appMenu.setBackgroundResource(R.drawable.round_rect)
         }
-        layoutParams.flags = (WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH)
+        layoutParams.flags = (WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
         val halign = if (sharedPreferences.getBoolean(
                 "center_app_menu",
                 false
@@ -1187,17 +1201,27 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
         val layoutParams = Utils.makeWindowParams(-2, -2, context, secondary)
         ColorUtils.applyMainColor(context, sharedPreferences, view)
         layoutParams.gravity = Gravity.START or Gravity.TOP
-        layoutParams.flags =
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+        layoutParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
         val location = IntArray(2)
         anchor.getLocationOnScreen(location)
         layoutParams.x = location[0]
         layoutParams.y = location[1] + Utils.dpToPx(context, anchor.measuredHeight / 2)
         view.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_OUTSIDE)
+            if (event.action == MotionEvent.ACTION_OUTSIDE){
                 windowManager.removeView(view)
-
+            }
             false
+        }
+        // Manejo del evento de retroceso en la vista
+        view.setOnKeyListener { v, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+                windowManager.removeView(view)
+                true
+            } else {
+                false
+            }
         }
         val actionsLv = view.findViewById<ListView>(R.id.tasks_lv)
         actionsLv.adapter = AppActionsAdapter(context, getAppActions(app))
@@ -1329,6 +1353,171 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
     }
 
     @SuppressLint("ClickableViewAccessibility")
+    private fun showAppContextMenuOnDockApps(app: App, anchor: View) {
+        val view = LayoutInflater.from(context).inflate(R.layout.task_list, null)
+        val layoutParams = Utils.makeWindowParams(-2, -2, context, secondary)
+        ColorUtils.applyMainColor(context, sharedPreferences, view)
+
+        layoutParams.gravity = Gravity.START or Gravity.TOP
+        layoutParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+
+        val location = IntArray(2)
+        anchor.getLocationOnScreen(location)
+
+        // Obtener la altura de la pantalla
+        val alturaPantalla = getScreenHeight(context)
+
+        // Agregar la vista al WindowManager
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        windowManager.addView(view, layoutParams)
+
+        // Usar ViewTreeObserver para obtener la altura de la vista después de que haya sido renderizada
+        view.viewTreeObserver.addOnGlobalLayoutListener {
+            alturaShowAppContextMenuOnDockApps = view.height // Almacenar la altura globalmente
+
+            // Ajustar la posición de la vista para que respete el margen inferior
+            layoutParams.x = location[0]
+            layoutParams.y = alturaPantalla - view.height - dockHeight
+
+            // Actualizar la vista con la nueva posición
+            windowManager.updateViewLayout(view, layoutParams)
+            Log.i("CHRIS - BLUE", "alturaShowAppContextMenuOnDockApps: " + alturaShowAppContextMenuOnDockApps)
+        }
+        //Añade color a la nueva vista BLUE
+        ColorUtils.applyColor(view, Color.BLUE);
+        Log.i("CHRIS - BLUE", "app.name: " + app.name)
+        Log.i("CHRIS - BLUE", "dockHeight: " + dockHeight)
+
+        // Manejar eventos de clic en la lista de acciones
+
+        view.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_OUTSIDE) {
+                windowManager.removeView(view)
+            }
+            false
+        }
+
+        view.setOnKeyListener { v, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+                windowManager.removeView(view)
+                true
+            } else {
+                false
+            }
+        }
+
+        // Configurar el ListView y adaptadores de la vista de acciones
+        val actionsLv = view.findViewById<ListView>(R.id.tasks_lv)
+        actionsLv.adapter = AppActionsAdapter(context, getAppActions(app))
+        actionsLv.setOnItemClickListener { adapterView, _, position, _ ->
+            if (adapterView.getItemAtPosition(position) is Action) {
+                val action = adapterView.getItemAtPosition(position) as Action
+                when (action.text) {
+                    getString(R.string.manage) -> {
+                        val actions = ArrayList<Action>().apply {
+                            add(Action(R.drawable.ic_arrow_back, ""))
+                            add(Action(R.drawable.ic_info, getString(R.string.app_info)))
+                            if (!AppUtils.isSystemApp(context, app.packageName) || sharedPreferences.getBoolean("allow_sysapp_uninstall", false)) {
+                                add(Action(R.drawable.ic_uninstall, getString(R.string.uninstall)))
+                            }
+                            if (sharedPreferences.getBoolean("allow_app_freeze", false)) {
+                                add(Action(R.drawable.ic_freeze, getString(R.string.freeze)))
+                            }
+                        }
+                        actionsLv.adapter = AppActionsAdapter(context, actions)
+                    }
+                    getString(R.string.shortcuts) -> {
+                        actionsLv.adapter = AppShortcutAdapter(context, DeepShortcutManager.getShortcuts(app.packageName, context)!!)
+                    }
+                    "" -> {
+                        actionsLv.adapter = AppActionsAdapter(context, getAppActions(app))
+                    }
+                    getString(R.string.open_as) -> {
+                        val actions = ArrayList<Action>().apply {
+                            add(Action(R.drawable.ic_arrow_back, ""))
+                            add(Action(R.drawable.ic_standard, getString(R.string.standard)))
+                            add(Action(R.drawable.ic_maximized, getString(R.string.maximized)))
+                            add(Action(R.drawable.ic_portrait, getString(R.string.portrait)))
+                            add(Action(R.drawable.ic_fullscreen, getString(R.string.fullscreen)))
+                        }
+                        actionsLv.adapter = AppActionsAdapter(context, actions)
+                    }
+                    getString(R.string.app_info) -> {
+                        launchApp(null, null, Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(Uri.parse("package:${app.packageName}")))
+                        windowManager.removeView(view)
+                    }
+                    getString(R.string.uninstall) -> {
+                        if (AppUtils.isSystemApp(context, app.packageName)) {
+                            DeviceUtils.runAsRoot("pm uninstall --user 0 ${app.packageName}")
+                        } else {
+                            startActivity(Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:${app.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }
+                        windowManager.removeView(view)
+                    }
+                    getString(R.string.freeze) -> {
+                        val status = DeviceUtils.runAsRoot("pm disable ${app.packageName}")
+                        if (status != "error") {
+                            Toast.makeText(context, R.string.app_frozen, Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, R.string.something_wrong, Toast.LENGTH_SHORT).show()
+                        }
+                        windowManager.removeView(view)
+                    }
+                    getString(R.string.favorites) -> {
+                        AppUtils.pinApp(context, app, AppUtils.PINNED_LIST)
+                        windowManager.removeView(view)
+                        loadFavoriteApps()
+                    }
+                    getString(R.string.desktop) -> {
+                        AppUtils.pinApp(context, app, AppUtils.DESKTOP_LIST)
+                        sendBroadcast(Intent(DOCK_SERVICE_ACTION).setPackage(packageName).putExtra("action", DESKTOP_APP_PINNED))
+                        windowManager.removeView(view)
+                    }
+                    getString(R.string.dock) -> {
+                        AppUtils.pinApp(context, app, AppUtils.DOCK_PINNED_LIST)
+                        loadPinnedApps()
+                        updateRunningTasks()
+                        windowManager.removeView(view)
+                    }
+                }
+            } else if (Build.VERSION.SDK_INT > 24 && adapterView.getItemAtPosition(position) is ShortcutInfo) {
+                val shortcut = adapterView.getItemAtPosition(position) as ShortcutInfo
+                windowManager.removeView(view)
+                DeepShortcutManager.startShortcut(shortcut, context)
+            } else if (Build.VERSION.SDK_INT > 28 && adapterView.getItemAtPosition(position) is Display) {
+                val display = adapterView.getItemAtPosition(position) as Display
+                windowManager.removeView(view)
+                launchApp(null, app.packageName, null, app, display.displayId, sharedPreferences.getBoolean("launch_new_instance_secondary", true))
+            }
+        }
+    }
+
+    // Función auxiliar para obtener la altura de la vista
+    fun getViewHeight(view: View, callback: (Int) -> Unit) {
+        view.post {
+            callback(view.height)
+            Log.i("CHRIS - AZUL", "Altura vista getViewHeight: " + view.height)
+            Log.i("CHRIS - AZUL", "Altura vista tasks_lv: " + view.findViewById<ListView>(R.id.tasks_lv).height)
+        }
+    }
+
+    fun getViewDynamicHeight(view: View, callback: (Int) -> Unit) {
+        view.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                if (view.height > 0) {
+                    // Llamar al callback con la altura de la vista
+                    callback(view.height)
+                    // Remover el listener para evitar múltiples llamadas
+                    view.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                }
+            }
+        })
+    }
+
+
+    @SuppressLint("ClickableViewAccessibility")
     private fun showDockAppContextMenu(app: App, anchor: View) {
         val view = LayoutInflater.from(context).inflate(R.layout.pin_entry, null)
         val pinLayout = view.findViewById<LinearLayout>(R.id.pin_entry_pin)
@@ -1346,9 +1535,7 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
 
         // Posición horizontal: mantiene la misma posición x
         layoutParams.x = location[0]
-
-        // Posición vertical: mueve la vista hacia arriba para que no se superponga
-        layoutParams.y = location[1] - Utils.dpToPx(context, 200) // Desplaza hacia arriba ajustando el valor de -200
+        layoutParams.y = location[1]
 
         view.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_OUTSIDE)
@@ -1390,7 +1577,36 @@ class DockService : AccessibilityService(), OnSharedPreferenceChangeListener, On
             updateRunningTasks()
             windowManager.removeView(view)
         }
+
         windowManager.addView(view, layoutParams)
+
+        // Usar ViewTreeObserver para obtener la altura de la vista después de que haya sido renderizada
+        view.viewTreeObserver.addOnGlobalLayoutListener {
+            val alturaPantalla = getScreenHeight(context)
+            val alturaVistaDockAppContextMenu = view.height
+
+            // Ajustar la posición de la vista para que respete el margen inferior
+            layoutParams.x = location[0]
+            layoutParams.y = alturaPantalla - dockHeight - alturaVistaDockAppContextMenu - alturaShowAppContextMenuOnDockApps // Usar la altura de la vista obtenida en `showAppContextMenuOnDockApps`
+
+            // Actualizar la vista con la nueva posición
+            windowManager.updateViewLayout(view, layoutParams)
+            Log.i("CHRIS - ROJO", "viewHeightROJA: " + alturaVistaDockAppContextMenu)
+        }
+
+        val showAppContextMenuHeight = view.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        //val viewHeight = Utils.getViewHeight(view)
+        //Añade color a la nueva vista ROJA
+        ColorUtils.applyColor(view, Color.RED);
+        Log.i("CHRIS - ROJO", "app.name: " + app.name)
+        Log.i("CHRIS - ROJO", "dockHeight: " + dockHeight)
+        //Log.i("CHRIS - ROJO", "y: " + layoutParams.y)
+        //Log.i("CHRIS - ROJO", "x: " + layoutParams.x)
+        //Log.i("CHRIS - ROJO", "viewHeight: " + viewHeight)
+        //Log.i("CHRIS - ROJO", "Altura pantalla: " + alturaPantalla)
+        Log.i("CHRIS - ROJO", "______________________________")
+
+
     }
 
     @SuppressLint("ClickableViewAccessibility")

@@ -13,7 +13,10 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.DisplayMetrics
 import android.view.Display
+import android.view.View
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.preference.PreferenceManager
@@ -241,4 +244,39 @@ object Utils {
 
     val currentDateString: String
         get() = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(Date())
+
+
+    // Función para obtener la altura de una vista
+    /*fun getViewHeight(view: View): Int {
+        // Asegúrate de que la vista esté medida
+        view.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        return view.measuredHeight
+    }*/
+
+
+    fun getViewHeight(view: View, callback: (Int) -> Unit) {
+        // Comprobar si la vista ya está medida
+        if (view.height > 0) {
+            callback(view.height)
+        } else {
+            // Agregar un `OnGlobalLayoutListener` para obtener la altura una vez que la vista esté completamente medida
+            view.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    // Asegúrate de eliminar el listener para evitar llamadas repetidas
+                    view.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    callback(view.height)
+                }
+            })
+        }
+    }
+
+
+    fun getScreenHeight(context: Context): Int {
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val displayMetrics = DisplayMetrics()
+        windowManager.defaultDisplay.getMetrics(displayMetrics)
+        return displayMetrics.heightPixels
+    }
+
+
 }
